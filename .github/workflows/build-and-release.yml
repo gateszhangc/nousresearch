@@ -7,92 +7,144 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: artemis-2-wallpaper-release
+  group: nousresearch-release
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: registry.144.91.77.245.sslip.io/dokploy-fleet-artemis-2-wallpaper-artemis-2-wallpaper
-  FLEET_REPO: gateszhangc/k8s-fleet
-  FLEET_TENANT_PATH: tenants/artemis-2-wallpaper/20-artemis-2-wallpaper-deployment.yaml
+  APP_NAME: nousresearch
+  NAMESPACE: nousresearch
+  IMAGE_NAME: registry.144.91.77.245.sslip.io/dokploy-fleet-nousresearch-nousresearch
 
 jobs:
-  build-and-push:
+  build-and-release:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Check out code
         uses: actions/checkout@v4
-
-      - name: Derive image tag
-        id: meta
-        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to registry
-        uses: docker/login-action@v3
         with:
-          registry: registry.144.91.77.245.sslip.io
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          fetch-depth: 0
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+          node-version: 20
+          cache: npm
 
-  update-fleet:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out fleet repo
-        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: npm test
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
         with:
-          repository: ${{ env.FLEET_REPO }}
-          token: ${{ secrets.FLEET_REPO_PAT }}
-          path: k8s-fleet
+          version: latest
 
-      - name: Update deployment image tag
+      - name: Write kubeconfig
         env:
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          printf "%s" "$KUBECONFIG_B64" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Ensure namespace exists
+        run: kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Submit kaniko build job
+        env:
+          GIT_SHA: ${{ github.sha }}
+          GIT_REPOSITORY: ${{ github.repository }}
+        run: |
+          JOB_NAME="${APP_NAME}-build-${GIT_SHA::7}"
+          kubectl delete job "${JOB_NAME}" --namespace "$NAMESPACE" --ignore-not-found=true
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${NAMESPACE}
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 600
+            template:
+              spec:
+                restartPolicy: Never
+                volumes:
+                  - name: workspace
+                    emptyDir: {}
+                  - name: registry-config
+                    secret:
+                      secretName: dokploy-fleet-ghcr
+                      items:
+                        - key: .dockerconfigjson
+                          path: config.json
+                initContainers:
+                  - name: fetch-source
+                    image: alpine/git:2.47.2
+                    command:
+                      - sh
+                      - -lc
+                      - |
+                        git clone --depth 1 "https://github.com/${GIT_REPOSITORY}.git" /workspace
+                        cd /workspace
+                        git fetch --depth 1 origin "${GIT_SHA}"
+                        git checkout "${GIT_SHA}"
+                    volumeMounts:
+                      - name: workspace
+                        mountPath: /workspace
+                containers:
+                  - name: kaniko
+                    image: gcr.io/kaniko-project/executor:v1.23.2-debug
+                    args:
+                      - --context=/workspace
+                      - --dockerfile=/workspace/Dockerfile
+                      - --destination=${IMAGE_NAME}:${GIT_SHA}
+                      - --cache=true
+                    volumeMounts:
+                      - name: workspace
+                        mountPath: /workspace
+                      - name: registry-config
+                        mountPath: /kaniko/.docker
+          EOF
+
+          kubectl wait --namespace "$NAMESPACE" --for=condition=complete "job/${JOB_NAME}" --timeout=20m
+          kubectl logs --namespace "$NAMESPACE" "job/${JOB_NAME}" --tail=-1
+
+      - name: Update kustomization image tag
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import os
           import re
           from pathlib import Path
 
-          path = Path("k8s-fleet") / os.environ["FLEET_TENANT_PATH"]
+          path = Path("deploy/overlays/prod/kustomization.yaml")
           content = path.read_text()
-          updated, count = re.subn(
-              r"(^\s*image:\s*registry\.144\.91\.77\.245\.sslip\.io/dokploy-fleet-artemis-2-wallpaper-artemis-2-wallpaper:).*$",
-              rf"\1{os.environ['IMAGE_TAG']}",
-              content,
-              count=1,
-              flags=re.MULTILINE,
-          )
+          updated, count = re.subn(r"(^\s*newTag:\s*).*$", rf"\1{os.environ['GIT_SHA']}", content, count=1, flags=re.MULTILINE)
           if count != 1:
-              raise SystemExit("Expected exactly one image line to update in the fleet deployment manifest.")
+              raise SystemExit("Expected exactly one newTag entry in deploy/overlays/prod/kustomization.yaml")
           path.write_text(updated)
           PY
 
-      - name: Commit fleet update
+      - name: Commit release update
         env:
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          GIT_SHA: ${{ github.sha }}
         run: |
-          cd k8s-fleet
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FLEET_TENANT_PATH"
+          git add deploy/overlays/prod/kustomization.yaml
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "chore: release artemis-2-wallpaper ${IMAGE_TAG}"
+          git commit -m "chore: release nousresearch ${GIT_SHA} [skip ci]"
           git push origin HEAD:main

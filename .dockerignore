@@ -7,4 +7,5 @@ tasks
 brand
 scripts
 tests
+deploy
 npm-debug.log*
