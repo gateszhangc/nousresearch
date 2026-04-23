@@ -5,8 +5,7 @@ metadata:
   labels:
     dokploy-fleet/project: nousresearch
   annotations:
-    acme.cert-manager.io/http01-edit-in-place: "true"
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/issuer: letsencrypt-prod-cloudflare
     cert-manager.io/issue-temporary-certificate: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/permanent-redirect: https://nousresearch.lol
