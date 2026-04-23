@@ -17,12 +17,6 @@ spec:
       name: nousresearch-live
       managedFieldsManagers:
         - cert-manager-challenges
-    - group: networking.k8s.io
-      kind: Ingress
-      namespace: nousresearch
-      name: nousresearch-www-redirect
-      managedFieldsManagers:
-        - cert-manager-challenges
   source:
     repoURL: https://github.com/gateszhangc/nousresearch.git
     targetRevision: main
