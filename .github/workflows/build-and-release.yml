@@ -130,7 +130,7 @@ jobs:
 
           path = Path("deploy/overlays/prod/kustomization.yaml")
           content = path.read_text()
-          updated, count = re.subn(r"(^\s*newTag:\s*).*$", rf"\1{os.environ['GIT_SHA']}", content, count=1, flags=re.MULTILINE)
+          updated, count = re.subn(r"(^\s*newTag:\s*).*$", rf"\g<1>{os.environ['GIT_SHA']}", content, count=1, flags=re.MULTILINE)
           if count != 1:
               raise SystemExit("Expected exactly one newTag entry in deploy/overlays/prod/kustomization.yaml")
           path.write_text(updated)
