@@ -9,4 +9,4 @@ resources:
 images:
   - name: app-image
     newName: registry.144.91.77.245.sslip.io/dokploy-fleet-nousresearch-nousresearch
-    newTag: 0d1cb25dd2f9430f28622cf020f4edd7c04f4a8d
+    newTag: 651e8318dcf8ee539305d231b210c538a5d2bfa3
